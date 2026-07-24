@@ -43,7 +43,7 @@ esp_err_t esp_lcd_touch_new_i2c_st1633i(const esp_lcd_panel_io_handle_t io_handl
     esp_err_t ret = ESP_OK;
     esp_lcd_touch_handle_t touch_handle = NULL;
 
-    ESP_LOGI(TAG, "esp_lcd_touch_new_i2c_st1633i");
+    ESP_LOGI(TAG, "esp_lcd_touch_new_i2c_st1633i (component v%s)", ST1633I_COMPONENT_VERSION);
 
     ESP_GOTO_ON_FALSE(io_handle && config && out_touch_handle, ESP_ERR_INVALID_ARG, err, TAG, "Invalid arguments");
 
