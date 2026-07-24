@@ -21,10 +21,14 @@ static const char *TAG = "st1633i";
 #define ST1633I_REG_IDLE_TIMEOUT     0x03    // secondi di inattivita' prima di entrare in Idle; 0xFF = disabilitato
 #define ST1633I_IDLE_WATCHDOG_PERIOD 200     // ogni quante letture ri-verificare/forzare l'uscita da Idle
 
+#define ST1633I_I2C_FAIL_RESET_THRESHOLD   5   // letture fallite di fila -> tenta un reset
+#define ST1633I_RESET_ESCALATE_THRESHOLD   3   // reset falliti di fila -> escala a power-cycle
+
 static esp_err_t st1633i_read_data(esp_lcd_touch_handle_t tp);
 static bool st1633i_get_xy(esp_lcd_touch_handle_t tp, uint16_t *x, uint16_t *y, uint16_t *strength, uint8_t *point_num, uint8_t max_point_num);
 static esp_err_t st1633i_del(esp_lcd_touch_handle_t tp);
 static esp_err_t st1633i_reset(esp_lcd_touch_handle_t tp);
+static esp_err_t st1633i_power_cycle(esp_lcd_touch_handle_t tp);
 static esp_err_t st1633i_set_swap_xy(esp_lcd_touch_handle_t tp, bool swap);
 static esp_err_t st1633i_get_swap_xy(esp_lcd_touch_handle_t tp, bool *swap);
 static esp_err_t st1633i_set_mirror_x(esp_lcd_touch_handle_t tp, bool mirror);
@@ -75,6 +79,19 @@ esp_err_t esp_lcd_touch_new_i2c_st1633i(const esp_lcd_panel_io_handle_t io_handl
         ESP_GOTO_ON_ERROR(ret, err, TAG, "GPIO config failed for RESET pin");
     }
 
+    // Gestione del pin di alimentazione opzionale (vedi st1633i_recovery_config_t): solo
+    // la configurazione dei pin qui, il power-cycle vero e proprio lo fa
+    // st1633i_power_cycle() piu' avanti (stessa funzione riusata dal watchdog).
+    st1633i_recovery_config_t *power_cfg = (st1633i_recovery_config_t *)touch_handle->config.driver_data;
+    if (power_cfg && power_cfg->power_gpio_num != GPIO_NUM_NC) {
+        gpio_config_t power_gpio_config = {
+            .mode = GPIO_MODE_OUTPUT,
+            .pin_bit_mask = 1ULL << power_cfg->power_gpio_num,
+        };
+        ret = gpio_config(&power_gpio_config);
+        ESP_GOTO_ON_ERROR(ret, err, TAG, "GPIO config failed for POWER pin");
+    }
+
     // Gestione del pin di INT/IRQ se presente. Il tipo di interrupt va impostato qui
     // affinché esp_lcd_touch_register_interrupt_callback() (nel componente base) possa
     // limitarsi ad abilitarlo con gpio_intr_enable().
@@ -89,9 +106,11 @@ esp_err_t esp_lcd_touch_new_i2c_st1633i(const esp_lcd_panel_io_handle_t io_handl
         ESP_GOTO_ON_ERROR(ret, err, TAG, "GPIO config failed for INT pin");
     }
 
-    // Esegui l'hardware reset iniziale se configurato
-    ret = st1633i_reset(touch_handle);
-    ESP_GOTO_ON_ERROR(ret, err, TAG, "ST1633i reset failed");
+    // Power-cycle + reset iniziale (se i pin sono configurati): garantisce un avvio
+    // pulito del chip indipendentemente dallo stato in cui si trovava prima (es. dopo
+    // un riavvio software senza perdita di alimentazione).
+    ret = st1633i_power_cycle(touch_handle);
+    ESP_GOTO_ON_ERROR(ret, err, TAG, "ST1633i power-cycle/reset failed");
 
     // Disabilita l'Idle Mode: senza questo, il chip entra in Idle dopo alcuni secondi
     // di inattivita' e il Device Status nello Status Register (0x01) smette di
@@ -132,14 +151,49 @@ static esp_err_t st1633i_read_data(esp_lcd_touch_handle_t tp)
 
     // 1. Leggi il blocco coordinate (FUORI dalla sezione critica)
     static bool i2c_error_logged = false;
+    // Watchdog di recovery: dopo ripetuti errori I2C consecutivi tenta un reset hardware;
+    // se il solo reset non basta dopo piu' tentativi, escala a un power-cycle completo
+    // (spegni/riaccendi l'alimentazione, poi reset) - stessa logica in due passi che il
+    // vecchio driver standalone st1633i esponeva come funzioni separate.
+    static int consecutive_i2c_failures = 0;
+    static int reset_attempts_since_recovery = 0;
+
+    // Soglie configurabili tramite driver_data (0 = usa il default del componente)
+    st1633i_recovery_config_t *recovery_cfg = (st1633i_recovery_config_t *)tp->config.driver_data;
+    uint16_t fail_reset_threshold = (recovery_cfg && recovery_cfg->i2c_fail_reset_threshold)
+                                         ? recovery_cfg->i2c_fail_reset_threshold
+                                         : ST1633I_I2C_FAIL_RESET_THRESHOLD;
+    uint16_t reset_escalate_threshold = (recovery_cfg && recovery_cfg->reset_escalate_threshold)
+                                             ? recovery_cfg->reset_escalate_threshold
+                                             : ST1633I_RESET_ESCALATE_THRESHOLD;
+
     esp_err_t ret = esp_lcd_panel_io_rx_param(tp->io, ST1633I_REG_XY0, buf, sizeof(buf));
     if (ret != ESP_OK) {
+        consecutive_i2c_failures++;
         if (!i2c_error_logged) {
             ESP_LOGW(TAG, "Lettura coordinate ST1633i fallita (err=%s)", esp_err_to_name(ret));
             i2c_error_logged = true;
         }
+        if (consecutive_i2c_failures >= fail_reset_threshold) {
+            if (reset_attempts_since_recovery >= reset_escalate_threshold) {
+                ESP_LOGW(TAG, "Reset normale non ha risolto dopo %d tentativi: eseguo power-cycle completo",
+                         reset_attempts_since_recovery);
+                st1633i_power_cycle(tp);
+                reset_attempts_since_recovery = 0;
+            } else {
+                reset_attempts_since_recovery++;
+                ESP_LOGW(TAG, "%d errori I2C consecutivi: eseguo reset hardware (tentativo %d/%d)",
+                         consecutive_i2c_failures, reset_attempts_since_recovery, reset_escalate_threshold);
+                st1633i_reset(tp);
+            }
+            uint8_t idle_disable = 0xFF;
+            esp_lcd_panel_io_tx_param(tp->io, ST1633I_REG_IDLE_TIMEOUT, &idle_disable, sizeof(idle_disable));
+            consecutive_i2c_failures = 0;
+        }
         return ret;
     }
+    consecutive_i2c_failures = 0;
+    reset_attempts_since_recovery = 0;
     if (i2c_error_logged) {
         ESP_LOGI(TAG, "ST1633i torna a rispondere su I2C");
         i2c_error_logged = false;
@@ -262,12 +316,26 @@ static esp_err_t st1633i_get_mirror_y(esp_lcd_touch_handle_t tp, bool *mirror)
 static esp_err_t st1633i_reset(esp_lcd_touch_handle_t tp)
 {
     if (tp->config.rst_gpio_num != GPIO_NUM_NC) {
-        ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, 0), TAG, "Reset pin low failed");
+        int reset_level = tp->config.levels.reset ? 1 : 0;
+        ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, reset_level), TAG, "Reset pin assert failed");
         vTaskDelay(pdMS_TO_TICKS(20));
-        ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, 1), TAG, "Reset pin high failed");
+        ESP_RETURN_ON_ERROR(gpio_set_level(tp->config.rst_gpio_num, !reset_level), TAG, "Reset pin release failed");
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     return ESP_OK;
+}
+
+static esp_err_t st1633i_power_cycle(esp_lcd_touch_handle_t tp)
+{
+    st1633i_recovery_config_t *pwr = (st1633i_recovery_config_t *)tp->config.driver_data;
+    if (pwr && pwr->power_gpio_num != GPIO_NUM_NC) {
+        int off_level = pwr->power_off_level ? 1 : 0;
+        gpio_set_level(pwr->power_gpio_num, off_level);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        gpio_set_level(pwr->power_gpio_num, !off_level);
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    return st1633i_reset(tp);
 }
 
 static esp_err_t st1633i_del(esp_lcd_touch_handle_t tp)

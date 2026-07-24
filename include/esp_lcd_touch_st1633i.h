@@ -10,6 +10,20 @@ extern extern "C" {
 #define ESP_LCD_TOUCH_IO_I2C_ST1633I_ADDRESS          (0x55)
 
 /**
+ * @brief Configurazione opzionale del pin di alimentazione e delle soglie del watchdog
+ *        di recovery, da passare tramite esp_lcd_touch_config_t::driver_data. Se non
+ *        impostata (driver_data == NULL) o con power_gpio_num == GPIO_NUM_NC, il
+ *        power-cycle e' disabilitato e il recovery usa solo il reset via rst_gpio_num.
+ *        Le soglie a 0 usano i default interni del componente.
+ */
+typedef struct {
+    gpio_num_t power_gpio_num;        /*!< Pin che alimenta il touch, o GPIO_NUM_NC se assente */
+    unsigned int power_off_level : 1; /*!< Livello del pin quando il touch e' spento */
+    uint16_t i2c_fail_reset_threshold; /*!< Letture I2C fallite consecutive prima di un reset; 0 = default */
+    uint16_t reset_escalate_threshold; /*!< Reset falliti consecutivi prima di un power-cycle; 0 = default */
+} st1633i_recovery_config_t;
+
+/**
  * @brief Inizializza un nuovo handle esp_lcd_touch_handle_t per ST1633i
  * 
  * @param[in] io_handle I2C IO handle precedentemente creato con esp_lcd_new_panel_io_i2c()
