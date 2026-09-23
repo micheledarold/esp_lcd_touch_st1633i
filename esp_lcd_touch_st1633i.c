@@ -247,13 +247,7 @@ static esp_err_t st1633i_read_data(esp_lcd_touch_handle_t tp)
     tp->data.points = final_points;
     portEXIT_CRITICAL(&tp->data.lock);
 
-    // 4. Gestione callback (Se necessaria): riusa i valori appena calcolati invece di rileggerli
-    if (tp->config.process_coordinates) {
-        uint16_t sx = x, sy = y, sstr = 0;
-        uint8_t sp_num = final_points;
-        tp->config.process_coordinates(tp, &sx, &sy, &sstr, &sp_num, 1);
-    }
-
+    // process_coordinates non va chiamata qui: la invoca gia' esp_lcd_touch_get_data() sui punti letti via get_xy
     return ESP_OK;
 }
 

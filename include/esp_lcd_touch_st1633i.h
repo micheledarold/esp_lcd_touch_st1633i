@@ -10,7 +10,7 @@ extern extern "C" {
 #define ESP_LCD_TOUCH_IO_I2C_ST1633I_ADDRESS          (0x55)
 
 // Tenere allineato manualmente al campo "version" di idf_component.yml
-#define ST1633I_COMPONENT_VERSION                     "0.2.0"
+#define ST1633I_COMPONENT_VERSION                     "0.2.1"
 
 /**
  * @brief Configurazione opzionale del pin di alimentazione e delle soglie del watchdog

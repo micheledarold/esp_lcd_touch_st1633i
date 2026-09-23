@@ -73,13 +73,17 @@ Nel `CMakeLists.txt` dell'app va aggiunto `esp_lcd_touch_st1633i` (e
 
 4. Collegarlo a LVGL come `lv_indev` di tipo `LV_INDEV_TYPE_POINTER`,
    leggendo le coordinate nella callback con `esp_lcd_touch_read_data(tp)` +
-   `esp_lcd_touch_get_coordinates(tp, ...)` (vedi `esp_lcd_touch.h`), oppure
-   chiamare direttamente `esp_lcd_touch_read_data()` / `esp_lcd_touch_get_coordinates()`
-   in un task di polling proprio.
+   `esp_lcd_touch_get_data(tp, ...)` (vedi `esp_lcd_touch.h`), oppure
+   chiamare direttamente `esp_lcd_touch_read_data()` / `esp_lcd_touch_get_data()`
+   in un task di polling proprio. Con `esp_lcd_touch` < 1.2 usare
+   `esp_lcd_touch_get_coordinates()`, deprecata dalla 1.2.
 
 ## Note
 
-- Solo single-touch (1 punto). Non implementa gesture/prossimità (registro `0x10`).
+- Solo single-touch (1 punto). Non implementa gesture/prossimità (registro `0x10`)
+  né `get_track_id`: con `esp_lcd_touch` >= 1.2 il campo `track_id` resta a 0.
+- La callback `process_coordinates` della config viene invocata da
+  `esp_lcd_touch_get_data()`, non dal driver in `esp_lcd_touch_read_data()`.
 - Se il chip non risponde su I2C in fase di init, l'inizializzazione non
   fallisce: viene solo loggato un warning (utile per bring-up quando
   alimentazione/reset non sono ancora cablati).
